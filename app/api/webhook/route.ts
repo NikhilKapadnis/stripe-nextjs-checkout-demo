@@ -1,51 +1,77 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
-import { markOrderPaid } from "@/lib/orders";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 
-export async function POST(req: Request) {
-  const body = await req.text();
-  const signature = req.headers.get("stripe-signature");
-
-  if (!signature) {
-    return NextResponse.json(
-      { error: "Missing Stripe signature" },
-      { status: 400 }
-    );
-  }
-
-  let event: Stripe.Event;
-
+export async function POST(req: NextRequest) {
   try {
-    event = stripe.webhooks.constructEvent(
-      body,
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET as string
-    );
-  } catch (error) {
-    console.error("Webhook signature verification failed:", error);
-    return NextResponse.json(
-      { error: "Webhook signature verification failed" },
-      { status: 400 }
-    );
-  }
+    const body = await req.json();
 
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object as Stripe.Checkout.Session;
+    const {
+      productId,
+      productName,
+      productDescription,
+      color,
+      unitAmount,
+      quantity,
+    } = body;
 
-    console.log("Payment completed via webhook");
-    console.log("Session ID:", session.id);
-    console.log("Customer email:", session.customer_details?.email);
-    console.log("Amount total:", session.amount_total);
-    console.log("Metadata:", session.metadata);
-
-    const orderId = session.metadata?.orderId;
-
-    if (orderId) {
-      markOrderPaid(orderId);
+    if (!productId || !productName || !unitAmount || !quantity) {
+      return NextResponse.json(
+        { error: "Missing product checkout data" },
+        { status: 400 }
+      );
     }
-  }
 
-  return NextResponse.json({ received: true });
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+
+      line_items: [
+        {
+          quantity,
+          price_data: {
+            currency: "eur",
+            unit_amount: unitAmount,
+            product_data: {
+              name: productName,
+              description: productDescription || `${color} demo shirt`,
+            },
+          },
+        },
+      ],
+
+      metadata: {
+        userId: "test_user",
+        productId,
+        productName,
+        color: color || "unknown",
+        quantity: String(quantity),
+        unitAmount: String(unitAmount),
+      },
+
+      payment_intent_data: {
+        metadata: {
+          userId: "test_user",
+          productId,
+          productName,
+          color: color || "unknown",
+          quantity: String(quantity),
+          unitAmount: String(unitAmount),
+        },
+      },
+
+      success_url: `${process.env.NEXT_PUBLIC_APP_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}/`,
+    });
+
+    return NextResponse.json({ url: session.url });
+  } catch (error) {
+    console.error("Checkout error:", error);
+
+    return NextResponse.json(
+      { error: "Failed to create checkout session" },
+      { status: 500 }
+    );
+  }
 }
