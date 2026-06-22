@@ -1,76 +1,72 @@
+import { createOrder } from "@/lib/orders";
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 
 export async function POST(req: NextRequest) {
+  const body = await req.text();
+  const signature = req.headers.get("stripe-signature");
+
+  if (!signature) {
+    return NextResponse.json(
+      { error: "Missing Stripe signature" },
+      { status: 400 }
+    );
+  }
+
+  let event: Stripe.Event;
+
   try {
-    const body = await req.json();
-
-    const {
-      productId,
-      productName,
-      productDescription,
-      color,
-      unitAmount,
-      quantity,
-    } = body;
-
-    if (!productId || !productName || !unitAmount || !quantity) {
-      return NextResponse.json(
-        { error: "Missing product checkout data" },
-        { status: 400 }
-      );
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      payment_method_types: ["card"],
-
-      line_items: [
-        {
-          quantity,
-          price_data: {
-            currency: "eur",
-            unit_amount: unitAmount,
-            product_data: {
-              name: productName,
-              description: productDescription || `${color} demo shirt`,
-            },
-          },
-        },
-      ],
-
-      metadata: {
-        userId: "test_user",
-        productId,
-        productName,
-        color: color || "unknown",
-        quantity: String(quantity),
-        unitAmount: String(unitAmount),
-      },
-
-      payment_intent_data: {
-        metadata: {
-          userId: "test_user",
-          productId,
-          productName,
-          color: color || "unknown",
-          quantity: String(quantity),
-          unitAmount: String(unitAmount),
-        },
-      },
-
-      success_url: `${process.env.NEXT_PUBLIC_APP_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}/`,
-    });
-
-    return NextResponse.json({ url: session.url });
+    event = stripe.webhooks.constructEvent(
+      body,
+      signature,
+      process.env.STRIPE_WEBHOOK_SECRET as string
+    );
   } catch (error) {
-    console.error("Checkout error:", error);
+    console.error("Webhook signature verification failed:", error);
 
     return NextResponse.json(
-      { error: "Failed to create checkout session" },
+      { error: "Webhook signature verification failed" },
+      { status: 400 }
+    );
+  }
+
+  try {
+    console.log("WEBHOOK EVENT:", event.type);
+
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object as Stripe.Checkout.Session;
+
+      console.log("CHECKOUT SESSION COMPLETED:", session.id);
+      console.log("SESSION METADATA:", session.metadata);
+
+      await createOrder({
+        userId: session.metadata?.userId || "guest",
+        productId: session.metadata?.productId || "unknown",
+        productName: session.metadata?.productName || "Unknown Product",
+        color: session.metadata?.color || "unknown",
+        quantity: session.metadata?.quantity || "1",
+        unitAmount: session.metadata?.unitAmount || "",
+        amountTotal: session.amount_total || 0,
+        currency: session.currency || "eur",
+        paymentStatus: session.payment_status || "unknown",
+        stripeSessionId: session.id,
+        stripePaymentIntentId:
+          typeof session.payment_intent === "string"
+            ? session.payment_intent
+            : session.payment_intent?.id || "",
+      });
+
+      console.log("ORDER WRITTEN TO GOOGLE SHEETS");
+    }
+
+    return NextResponse.json({ received: true });
+  } catch (error) {
+    console.error("Webhook handling error:", error);
+
+    return NextResponse.json(
+      { error: "Webhook handler failed" },
       { status: 500 }
     );
   }
